@@ -8,3 +8,6 @@
 **/datasets/
 **/styles/
 **/*result*.jpg
+**/mAP/
+**/VOCdevkit/
+**/VOC*.tar
