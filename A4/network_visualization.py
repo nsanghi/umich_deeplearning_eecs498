@@ -93,12 +93,24 @@ def make_adversarial_attack(X, target_y, model, max_iter=100, verbose=True):
   # You can print your progress over iterations to check your algorithm.       #
   ##############################################################################
   # Replace "pass" statement with your code
+  target = torch.tensor([target_y],dtype=torch.long, device=X.device)
   for i in range(max_iter):
     scores = model(X_adv)
     loss = nn.CrossEntropyLoss()
-    if scores.max().item() == target_y:
+    if scores.data.max(1)[1][0].item() == target_y:
       break
-    loss_value = loss(scores, target_y)
+    loss_value = loss(scores, target)
+    loss_value.backward()
+    dx = learning_rate * X_adv.grad.data / X_adv.grad.data.norm()
+    X_adv.data.sub_(dx.data)
+    X_adv.grad.data.zero_()
+    if verbose:
+      X_adv_np = deprocess(X_adv.clone().cpu())
+      X_adv_np = np.asarray(X_adv_np).astype(np.uint8)
+      plt.imshow(X_adv_np)
+      plt.title(f'Iteration: {i}')
+      plt.axis('off')
+
   ##############################################################################
   #                             END OF YOUR CODE                               #
   ##############################################################################
@@ -133,7 +145,13 @@ def class_visualization_step(img, target_y, model, **kwargs):
     # after each step.                                                     #
     ########################################################################
     # Replace "pass" statement with your code
-    pass
+    scores = model(img)
+    s_y = scores[0, target_y]
+    loss = s_y - l2_reg * img.data.norm()**2
+    loss.backward()
+    d_img = learning_rate * img.grad.data
+    img.data.add_(d_img)
+    img.grad.data.zero_()
     ########################################################################
     #                             END OF YOUR CODE                         #
     ########################################################################
