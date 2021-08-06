@@ -1,0 +1,10 @@
+**/__pycache__/
+**/*.pt
+**/cifar*/
+**/cifar*
+**/*.pth
+**/*.pkl
+**/*.npz
+**/datasets/
+**/styles/
+**/*result*.jpg
