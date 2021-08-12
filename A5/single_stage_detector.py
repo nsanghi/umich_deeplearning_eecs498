@@ -38,7 +38,24 @@ def GenerateAnchor(anc, grid):
   # generate all the anchor coordinates for each image. Support batch input.   #
   ##############################################################################
   # Replace "pass" statement with your code
-  pass
+  B, H, W, _ = grid.shape
+  A = anc.shape[0]
+  anchors = grid.repeat(1,1,1,2).view(B,-1).repeat(1,A).view(B,A,H,W,-1)
+
+  # option 1 without any loops
+  anc_expanded = anc.repeat(1,2).view(A,-1).repeat(1,H*W).view(A,H,W,-1).unsqueeze(0)
+  anc_expanded /= 2
+  anc_expanded[:,:,:,:,0] *= -1
+  anc_expanded[:,:,:,:,1] *= -1
+  anchors += anc_expanded
+
+  # option 2 with loops
+  # for a in range(A):
+  #   anchors[:,a,:,:,0] -= anc[a,0]/2
+  #   anchors[:,a,:,:,2] += anc[a,0]/2
+  #   anchors[:,a,:,:,1] -= anc[a,1]/2
+  #   anchors[:,a,:,:,3] += anc[a,1]/2
+  
   ##############################################################################
   #                               END OF YOUR CODE                             #
   ##############################################################################
