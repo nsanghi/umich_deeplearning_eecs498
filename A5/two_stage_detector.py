@@ -28,7 +28,13 @@ class ProposalModule(nn.Module):
     # Make sure that your region proposal module is called pred_layer
     self.pred_layer = None      
     # Replace "pass" statement with your code
-    pass
+    self.pred_layer = nn.Sequential(
+      nn.Conv2d(in_dim, hidden_dim, kernel_size=3, stride=1, padding=1),
+      nn.Dropout(drop_ratio),
+      nn.LeakyReLU(),
+      nn.Conv2d(hidden_dim, self.num_anchors*6, kernel_size=1, stride=1, padding=0),
+    )
+
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -105,7 +111,18 @@ class ProposalModule(nn.Module):
     # function from the previous notebook.                                     #
     ############################################################################
     # Replace "pass" statement with your code
-    pass
+    pred = self.pred_layer(features) #Bx(Ax6)x7x7
+    B, _, H, W = pred.shape
+    pred = pred.view(B, self.num_anchors,6,H,W) #BxAx6xHxW
+    conf_scores = pred[:,:,:2,:,:] #BxAx2xHxW
+    offsets = pred[:,:,2:,:,:] #BxAx4xHxW
+
+    if mode == 'train':
+      pos_anchors_scores = self._extract_anchor_data(conf_scores, pos_anchor_idx) # M*2
+      neg_anchors_scores = self._extract_anchor_data(conf_scores, neg_anchor_idx) # M*2
+      conf_scores = torch.cat([pos_anchors_scores, neg_anchors_scores], dim=0) # 2M*2
+      offsets = self._extract_anchor_data(offsets, pos_anchor_idx) # M*4
+      proposals = GenerateProposal(pos_anchor_coord, offsets, method='FasterRCNN') # M*4
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################

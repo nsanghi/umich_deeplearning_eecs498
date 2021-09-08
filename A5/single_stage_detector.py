@@ -1,5 +1,6 @@
 import time
 import math
+from numpy import dtype
 import torch 
 import torch.nn as nn
 from torch import optim
@@ -47,7 +48,7 @@ def GenerateAnchor(anc, grid):
   anc_expanded /= 2
   anc_expanded[:,:,:,:,0] *= -1
   anc_expanded[:,:,:,:,1] *= -1
-  anchors += anc_expanded
+  anchors += anc_expanded.to(grid.device)
 
   # option 2 with loops
   # for a in range(A):
@@ -91,7 +92,29 @@ def GenerateProposal(anchors, offsets, method='YOLO'):
   # compute the proposal coordinates using the transformation formulas above.  #
   ##############################################################################
   # Replace "pass" statement with your code
-  pass
+  # transform to center, width, heigth
+
+  corner2center = torch.tensor([
+                      [ 0.5, 0.0,0.5,0.0],
+                      [ 0.0, 0.5,0.0,0.5],
+                      [-1.0, 0.0,1.0,0.0],
+                      [ 0.0,-1.0,0.0,1.0]], dtype=anchors.dtype, device=anchors.device) 
+  center2corner = torch.tensor([
+                      [1.0,0.0,-0.5, 0.0],
+                      [0.0,1.0, 0.0,-0.5],
+                      [1.0,0.0, 0.5, 0.0],
+                      [0.0,1.0, 0.0, 0.5]], dtype=anchors.dtype, device=anchors.device)
+  anchors_c = anchors.clone().view(-1,4).matmul(corner2center.T)
+  offsets = offsets.reshape(-1,4)
+  proposals = torch.zeros_like(anchors_c)
+  if method == 'YOLO':
+    proposals[:,0:2] = anchors_c[:,0:2] + offsets[:,0:2]
+    proposals[:,2:] = anchors_c[:,2:] * offsets[:,2:].exp()
+  else:
+    proposals[:,0:2] = anchors_c[:,0:2] + offsets[:,0:2] * anchors_c[:,2:]
+    proposals[:,2:] = anchors_c[:,2:] * offsets[:,2:].exp()  
+
+  proposals = proposals.matmul(center2corner.T).reshape_as(anchors)
   ##############################################################################
   #                               END OF YOUR CODE                             #
   ##############################################################################
@@ -132,7 +155,40 @@ def IoU(proposals, bboxes):
   # bottom-right corner of proposal and bbox. Think about their relationships. #
   ##############################################################################
   # Replace "pass" statement with your code
-  pass
+  B, A, H, W, _ = proposals.shape
+  _, N, _ = bboxes.shape
+  proposals = proposals.reshape(B, A*H*W, 4)
+  bboxes = bboxes[:,:,:-1] # drop 5th value which object class
+  proposals = proposals.unsqueeze(2).repeat(1,1,N,1)
+  bboxes = bboxes.unsqueeze(1).expand(B, A*H*W, N, 4)
+
+  def area(ls):
+    return (ls[:,:,:,2] - ls[:,:,:,0])*(ls[:,:,:,3] - ls[:,:,:,1])
+  def area_intersction(ls1, ls2):
+    tl = torch.maximum(ls1[:,:,:,0:2], ls2[:,:,:,0:2])
+    br = torch.minimum(ls1[:,:,:,2:4], ls2[:,:,:,2:4])
+    return (br[:,:,:,0] - tl[:,:,:,0]).clamp(min=0.0)*(br[:,:,:,1] - tl[:,:,:,1]).clamp(min=0.0)
+  area_proposals = area(proposals)
+  area_bboxes = area(bboxes)
+  area_int = area_intersction(proposals, bboxes)
+  area_union = area_proposals + area_bboxes - area_int
+  iou_mat = area_int / area_union
+
+  # alternate code
+  # B, A, H, W,_ = proposals.shape
+  # _,N,_=bboxes.shape
+  # proposals = proposals.reshape(B,A*H*W,4)
+  # proposals = proposals.unsqueeze(2).repeat(1,1,N,1)
+  # iou_mat = torch.zeros((B,A*H*W,N),device=proposals.device)*-1
+
+  # max_x1 = torch.max(proposals[:,:,:,0],bboxes[:,:,0].unsqueeze(1))
+  # max_y1 = torch.max(proposals[:,:,:,1],bboxes[:,:,1].unsqueeze(1))
+  # min_x2 = torch.min(proposals[:,:,:,2],bboxes[:,:,2].unsqueeze(1))
+  # min_y2 = torch.min(proposals[:,:,:,3],bboxes[:,:,3].unsqueeze(1))
+  # intersection = torch.clamp(min_x2-max_x1,min=0) * torch.clamp(min_y2-max_y1,min=0)
+  # AreaGT=(bboxes[:,:,2]-bboxes[:,:,0])*(bboxes[:,:,3]-bboxes[:,:,1])
+  # Area2=(proposals[:,:,:,2]-proposals[:,:,:,0])*(proposals[:,:,:,3]-proposals[:,:,:,1])
+  # iou_mat = intersection/(AreaGT.unsqueeze(1)+Area2-intersection)
   ##############################################################################
   #                               END OF YOUR CODE                             #
   ##############################################################################
@@ -159,7 +215,12 @@ class PredictionNetwork(nn.Module):
     # Make sure to name your prediction network pred_layer.
     self.pred_layer = None
     # Replace "pass" statement with your code
-    pass
+    self.pred_layer = nn.Sequential(
+          nn.Conv2d(in_dim,hidden_dim, 1),
+          nn.Dropout(drop_ratio),
+          nn.LeakyReLU(),
+          nn.Conv2d(hidden_dim, 5*num_anchors+num_classes, 1)
+        )
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -256,7 +317,23 @@ class PredictionNetwork(nn.Module):
     # negative anchors specified by pos_anchor_idx and neg_anchor_idx.         #
     ############################################################################
     # Replace "pass" statement with your code
-    pass
+    pred = self.pred_layer(features) #(B, 5*A+C, 7, 7)
+    B,_,h,w = pred.shape
+    class_scores = pred[:,-self.num_classes:,:,:] # B*C*H*W
+    conf_n_offset = pred[:,:5*self.num_anchors,:,:].view(B, self.num_anchors, 5, h, w)
+
+    if pos_anchor_idx != None: # training phase
+      pos_anchors = self._extract_anchor_data(conf_n_offset, pos_anchor_idx) # M*5
+      neg_anchors = self._extract_anchor_data(conf_n_offset, neg_anchor_idx) # M*5
+      conf_scores = torch.cat([pos_anchors[:,0:1], neg_anchors[:,0:1]], dim=0).sigmoid() # 2M*1
+      offsets = pos_anchors[:,1:]
+      offsets[:,:2] = offsets[:,:2].sigmoid() - 0.5 # M*4
+      class_scores = self._extract_class_scores(class_scores, pos_anchor_idx) # M*C
+    else: # inference phase
+      conf_scores = conf_n_offset[:,:,0,:,:] # B*A*H*W
+      conf_scores = conf_scores.sigmoid() # B*A*H*W
+      offsets = conf_n_offset[:,:,1:,:,:] #B*A*4*H*W
+      offsets[:,:,:2,:,:] = offsets[:,:,:2,:,:].sigmoid() - 0.5 #B*A*4*H*W
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -305,7 +382,30 @@ class SingleStageDetector(nn.Module):
     #       (A5-1) for a better performance than with the default value.         #
     ##############################################################################
     # Replace "pass" statement with your code
-    pass
+
+    # i) Image feature extraction
+    features = self.feat_extractor(images)
+
+    # ii) Grid and anchor generation
+    batch_size = features.shape[0]
+    grid = GenerateGrid(batch_size)
+    anchors = GenerateAnchor(self.anchor_list, grid)
+
+    # iii) Compute IoU between anchors and GT boxes and then determine activated/#
+    #      negative anchors, and GT_conf_scores, GT_offsets, GT_class, 
+    iou_mat = IoU(anchors, bboxes)
+    activated_anc_ind, negative_anc_ind, GT_conf_scores, GT_offsets, GT_class, _, _ = \
+         ReferenceOnActivatedAnchors(anchors, bboxes, grid, iou_mat, method='YOLO')
+
+    # iv) Compute conf_scores, offsets, class_prob through the prediction network 
+    conf_scores, offsets, class_prob = self.pred_network(features, activated_anc_ind, negative_anc_ind)
+
+    # v) Compute the total_loss
+    conf_loss = ConfScoreRegression(conf_scores, GT_conf_scores)
+    reg_loss = BboxRegression(offsets, GT_offsets)
+    anc_per_img = torch.prod(torch.tensor(anchors.shape[1:-1]))
+    cls_loss = ObjectClassification(class_prob, GT_class, batch_size, anc_per_img, activated_anc_ind)
+    total_loss = w_conf * conf_loss + w_reg * reg_loss + w_cls * cls_loss
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -341,7 +441,52 @@ class SingleStageDetector(nn.Module):
     # lists of B 2-D tensors (you may need to unsqueeze dim=1 for the last two). #
     ##############################################################################
     # Replace "pass" statement with your code
-    pass
+    with torch.no_grad():
+      # i) Image feature extraction
+      feat = self.feat_extractor(images)
+      # print("feat.shape",feat.shape)
+
+      # ii) Grid and anchor generation
+      batch_size = images.shape[0]
+      grid = GenerateGrid(batch_size)
+      anchors = GenerateAnchor(self.anchor_list.cuda(), grid)
+      
+      # iii) Compute conf_scores, proposals, class_prob through the prediction network
+      conf_scores, offsets, class_scores = self.pred_network(feat)
+      B,A,H,W = conf_scores.shape
+      _,C,_,_ = class_scores.shape
+      # conf_scores: B,A,H,W
+      # offsets: B,A,4,H,W
+      # class_scores: B,C,H,W
+      offsets = offsets.permute((0,1,3,4,2))
+      proposals = GenerateProposal(anchors, offsets, method='YOLO') #proposals:B,A,H,W,4
+      
+      # transform
+      conf_scores = conf_scores.permute((0,2,3,1)).reshape(batch_size,-1) # (B,(HWA)}
+      proposals = proposals.permute((0,2,3,1,4)).reshape(batch_size,-1,4) # (B,(HWA),4)
+      class_scores = class_scores.permute((0,2,3,1)) #(B,H,W,C)
+      _,maxindex = class_scores.max(3)
+      maxindex = maxindex.reshape(batch_size,-1) #(B,HW)
+
+      for i in range(batch_size):
+        # get proposals, confidence scores for i-th image
+        sub_conf_scores = conf_scores[i] #(HWA)
+        sub_proposals = proposals[i] #(HWA,4)
+        sub_class_scores = maxindex[i] #(HW)
+        sub_class_scores = sub_class_scores.unsqueeze(1).repeat(1,A).reshape(-1) #(HWA)
+
+        # filter by conf_scores
+        mask1 = sub_conf_scores > thresh
+        sub_conf_scores = sub_conf_scores[mask1]
+        sub_proposals = sub_proposals[mask1,:]
+        sub_class_scores = sub_class_scores[mask1]
+        # filter by nms
+        mask2 = nms(sub_proposals, sub_conf_scores, iou_threshold=nms_thresh)
+        # append result
+        final_proposals.append(sub_proposals[mask2,:])
+        final_conf_scores.append(sub_conf_scores[mask2].unsqueeze(1))
+        final_class.append(sub_class_scores[mask2].unsqueeze(1))
+        
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -380,8 +525,32 @@ def nms(boxes, scores, iou_threshold=0.5, topk=None):
   # HINT: You can refer to the torchvision library code:                      #
   #   github.com/pytorch/vision/blob/master/torchvision/csrc/cpu/nms_cpu.cpp  #
   #############################################################################
-  # Replace "pass" statement with your code
-  pass
+  # Replace "pass" statement with your code    
+  device = boxes.device
+  keep = []
+  order = scores.sort(0, descending=True)[1]
+  x1 = boxes[:,0]
+  y1 = boxes[:,1]
+  x2 = boxes[:,2]
+  y2 = boxes[:,3]
+  area = (y2-y1)*(x2-x1)
+  num_to_keep = 0
+  while (len(order)>0):
+    i = order[0]
+    keep.append(i)
+    num_to_keep += 1
+    if topk and num_to_keep >= topk:
+      break
+    sub_boxes = boxes[order[1:]]  #pick all expect the first one which is being selected
+    GTarea = area[i]
+    sub_area = area[order[1:]]
+    max_x1, max_y1 = torch.max(boxes[i,0], sub_boxes[:,0]), torch.max(boxes[i,1], sub_boxes[:,1])
+    min_x2, min_y2 = torch.min(boxes[i,2], sub_boxes[:,2]), torch.min(boxes[i,3], sub_boxes[:,3])
+    int_area = torch.clamp(min_x2-max_x1, min=0)*torch.clamp(min_y2-max_y1, min=0)
+    iou = int_area/(GTarea+sub_area-int_area)
+    order = order[1:][iou<iou_threshold] #remove the first one which is being selected as well as all the boxes that have IoU > iou_threshold
+
+  keep = torch.tensor(keep, dtype=torch.long, device=device)
   #############################################################################
   #                              END OF YOUR CODE                             #
   #############################################################################

@@ -268,10 +268,10 @@ def ReferenceOnActivatedAnchors(anchors, bboxes, grid, iou_mat, pos_thresh=0.7, 
   N = bboxes.shape[1]
 
   # activated/positive anchors
-  max_iou_per_anc, max_iou_per_anc_ind = iou_mat.max(dim=-1)
+  max_iou_per_anc, max_iou_per_anc_ind = iou_mat.max(dim=-1) #Bx(AxH’xW’)
   if method == 'FasterRCNN':
-    max_iou_per_box = iou_mat.max(dim=1, keepdim=True)[0]
-    activated_anc_mask = (iou_mat == max_iou_per_box) & (max_iou_per_box > 0)
+    max_iou_per_box = iou_mat.max(dim=1, keepdim=True)[0] #Bx1xN
+    activated_anc_mask = (iou_mat == max_iou_per_box) & (max_iou_per_box > 0) #Bx(AxH’xW’)xN
     activated_anc_mask |= (iou_mat > pos_thresh) # using the pos_thresh condition as well
     # if an anchor matches multiple GT boxes, choose the box with the largest iou
     activated_anc_mask = activated_anc_mask.max(dim=-1)[0] # Bx(AxH’xW’)
@@ -290,29 +290,29 @@ def ReferenceOnActivatedAnchors(anchors, bboxes, grid, iou_mat, pos_thresh=0.7, 
       .unsqueeze(-1).expand(B, A*h_amap*w_amap, 1, 4)).view(-1, 4)
     bboxes = bboxes[activated_anc_ind]
   else:
-    bbox_mask = (bboxes[:, :, 0] != -1) # BxN, indicate invalid boxes
+    bbox_mask = (bboxes[:, :, 0] != -1) # BxN, indicate invalid boxes 
     bbox_centers = (bboxes[:, :, 2:4] - bboxes[:, :, :2]) / 2. + bboxes[:, :, :2] # BxNx2
 
     mah_dist = torch.abs(grid.view(B, -1, 2).unsqueeze(2) - bbox_centers.unsqueeze(1)).sum(dim=-1) # Bx(H'xW')xN
     min_mah_dist = mah_dist.min(dim=1, keepdim=True)[0] # Bx1xN
-    grid_mask = (mah_dist == min_mah_dist).unsqueeze(1) # Bx1x(H'xW')xN
+    grid_mask = (mah_dist == min_mah_dist).unsqueeze(1) # Bx1x(H'xW')xN. max of Bx1xN values are True
 
-    reshaped_iou_mat = iou_mat.view(B, A, -1, N)
-    anc_with_largest_iou = reshaped_iou_mat.max(dim=1, keepdim=True)[0] # Bx1x(H’xW’)xN
-    anc_mask = (anc_with_largest_iou == reshaped_iou_mat) # BxAx(H’xW’)xN
-    activated_anc_mask = (grid_mask & anc_mask).view(B, -1, N)
-    activated_anc_mask &= bbox_mask.unsqueeze(1)
+    reshaped_iou_mat = iou_mat.view(B, A, -1, N) # BxAx(H’xW’)xN
+    anc_with_largest_iou = reshaped_iou_mat.max(dim=1, keepdim=True)[0] # Bx1x(H’xW’)xN . One true per A anchors for a given dim
+    anc_mask = (anc_with_largest_iou == reshaped_iou_mat) # BxAx(H’xW’)xN  # only one value per AxH'xW' is True
+    activated_anc_mask = (grid_mask & anc_mask).view(B, -1, N) # Bx(AxH’xW’)xN
+    activated_anc_mask &= bbox_mask.unsqueeze(1) # Bx(AxH’xW’)xN
     
     # one anchor could match multiple GT boxes
-    activated_anc_ind = torch.nonzero(activated_anc_mask.view(-1)).squeeze(-1)
+    activated_anc_ind = torch.nonzero(activated_anc_mask.view(-1)).squeeze(-1) # (M, ) with M index in (BxAxH'xW'xN)
     GT_conf_scores = iou_mat.view(-1)[activated_anc_ind]
-    bboxes = bboxes.view(B, 1, N, 5).repeat(1, A*h_amap*w_amap, 1, 1).view(-1, 5)[activated_anc_ind]
-    GT_class = bboxes[:, 4].long()
-    bboxes = bboxes[:, :4]
-    activated_anc_ind = (activated_anc_ind / float(activated_anc_mask.shape[-1])).long()
+    bboxes = bboxes.view(B, 1, N, 5).repeat(1, A*h_amap*w_amap, 1, 1).view(-1, 5)[activated_anc_ind] # (M, 5) M is max of BxN 
+    GT_class = bboxes[:, 4].long() #(M, ) 
+    bboxes = bboxes[:, :4] #(M, 4)
+    activated_anc_ind = (activated_anc_ind / float(activated_anc_mask.shape[-1])).long() # (M,) with M index in range (BxAxH'xW')
 
   print('number of pos proposals: ', activated_anc_ind.shape[0])
-  activated_anc_coord = anchors.view(-1, 4)[activated_anc_ind]
+  activated_anc_coord = anchors.view(-1, 4)[activated_anc_ind]  # (Mx4) with M in range (BxAxH'xW')
 
   # GT offsets
   # bbox and anchor coordinates are x_tl, y_tl, x_br, y_br
@@ -330,7 +330,7 @@ def ReferenceOnActivatedAnchors(anchors, bboxes, grid, iou_mat, pos_thresh=0.7, 
       "x and y offsets should be between -0.5 and 0.5! Got {}".format( \
       torch.max(torch.abs(xy_offsets)))
 
-  GT_offsets = torch.cat((xy_offsets, wh_offsets), dim=-1)
+  GT_offsets = torch.cat((xy_offsets, wh_offsets), dim=-1) # (Mx4)
 
   # negative anchors
   negative_anc_mask = (max_iou_per_anc < neg_thresh) # Bx(AxH’xW’)
