@@ -235,7 +235,31 @@ class RPN(nn.Module):
     #       as positive/negative anchors have been explicitly targeted.          #
     ##############################################################################
     # Replace "pass" statement with your code
-    pass
+
+    # i) Image feature extraction
+    features = self.feat_extractor(images) #(B, 1280, 7, 7)
+
+    # ii) Grid and anchor generation
+    batch_size = features.shape[0]
+    grid = GenerateGrid(batch_size)
+    anchors = GenerateAnchor(self.anchor_list, grid) # (B, A, H', W', 4)
+    anc_per_img = torch.prod(torch.tensor(anchors.shape[1:-1])) #i.e. value of (AxH'xW')
+
+    # iii) Compute IoU between anchors and GT boxes and then determine activated/#
+    #      negative anchors, and GT_conf_scores, GT_offsets, GT_class,
+    iou_mat = IoU(anchors, bboxes)
+    activated_anc_ind, negative_anc_ind, GT_conf_scores, GT_offsets, GT_class, \
+    activated_anc_coord, negative_anc_coord = \
+         ReferenceOnActivatedAnchors(anchors, bboxes, grid, iou_mat, method='FasterRCNN')
+    pos_anchor_idx = activated_anc_ind
+
+    # iv) Compute conf_scores, offsets, proposals through the region proposal    #
+    #     module     
+    conf_scores, offsets, proposals = self.prop_module(features, activated_anc_coord, activated_anc_ind, negative_anc_ind)
+
+    # v) Compute the total_loss for RPN
+    total_loss = w_conf * ConfScoreRegression(conf_scores, batch_size) + \
+                  w_reg * BboxRegression(offsets, GT_offsets, batch_size)
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -289,7 +313,49 @@ class RPN(nn.Module):
     # HINT: Use `torch.no_grad` as context to speed up the computation.          #
     ##############################################################################
     # Replace "pass" statement with your code
-    pass
+    with torch.no_grad():
+
+      # i) Image feature extraction
+      features = self.feat_extractor(images) #(B, 1280, 7, 7)
+
+      # ii) Grid and anchor generation
+      batch_size = features.shape[0]
+      grid = GenerateGrid(batch_size)
+      anchors = GenerateAnchor(self.anchor_list, grid)
+
+      # iv) Compute conf_scores, offsets through the region proposal
+      conf_scores, offsets = self.prop_module(features)
+      # conf_scores: (B, A, 2, H', W'), offsets: (B, A, 4, H', W')
+      _, A, _, H, W = conf_scores.shape
+
+      offsets = offsets.permute(0,1,3,4,2) #(B, A, H', W', 4)
+      proposals = GenerateProposal(anchors, offsets, method="FasterRCNN") #(B, A, H', W', 4)
+      proposals  = proposals.view(batch_size, -1, 4) #(B, P, 4)
+      # ideally we should use softmax but looks like taking 0th element and doing sigmoid has a bit better results
+      # not sure why
+      #conf_scores = conf_scores.permute(0,1,3,4,2).softmax(-1).contiguous().view(batch_size, -1, 2)[:,:,0] #(B, P)
+      conf_scores = conf_scores.permute(0,1,3,4,2)[:,:,:,:,0].sigmoid().contiguous().view(batch_size, -1)
+
+      final_conf_probs, final_proposals = [], []
+
+      for i in range(batch_size):
+        conf_scores_i, proposals_i = conf_scores[i], proposals[i]
+        # (P,) (P,4)
+
+        # filter by threshold
+        mask1 = conf_scores_i > thresh
+        conf_scores_i = conf_scores_i[mask1]
+        proposals_i = proposals_i[mask1]
+
+        #filter by nms threshold
+        keep = torchvision.ops.nms(proposals_i, conf_scores_i, nms_thresh)
+        conf_scores_i = conf_scores_i[keep].unsqueeze(1)
+        proposals_i = proposals_i[keep]
+
+        #append to list
+        final_conf_probs.append(conf_scores_i)
+        final_proposals.append(proposals_i)
+
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -315,11 +381,15 @@ class TwoStageDetector(nn.Module):
     # hidden_dim -> num_classes.                                                 #
     ##############################################################################
     # Your RPN and classification layers should be named as follows
-    self.rpn = None
-    self.cls_layer = None
-
     # Replace "pass" statement with your code
-    pass
+    self.rpn = RPN()
+    self.cls_layer = nn.Sequential(
+      nn.Linear(in_dim, hidden_dim),
+      nn.Dropout(drop_ratio),
+      nn.ReLU(),
+      nn.Linear(hidden_dim, self.num_classes)
+    )
+
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -353,7 +423,27 @@ class TwoStageDetector(nn.Module):
     #    total_loss = rpn_loss + cls_loss.                                       #
     ##############################################################################
     # Replace "pass" statement with your code
-    pass
+    batch_size = images.shape[0]
+    total_loss, conf_scores, proposals, features, \
+    GT_class, pos_anchor_idx, anc_per_img = self.rpn(images, bboxes, output_mode="all")
+    # for each above sizes are first dim of size M and 2nd dim as appropriate
+
+    # pos_anchor_idx value goes from 0 to (BxAxH’xW’)
+    # so to find the batch number of each anchor we need to divide by (AxH’xW’) i.e. anc_per_img
+    batch_index = (pos_anchor_idx // anc_per_img).unsqueeze(-1).to(dtype=proposals.dtype)
+    batch_indexed_proposals = torch.cat([batch_index, proposals], dim=1)  #(M, 5)
+
+    roi_aliged_featured = torchvision.ops.roi_align(features, batch_indexed_proposals, (self.roi_output_h, self.roi_output_w))
+    #shape (M, 1280, roi_output_h, roi_output_w)
+
+    pooled_features = torch.mean(roi_aliged_featured, dim=(2,3))
+    #shape (M, 1280)
+
+    cls_scores = self.cls_layer(pooled_features) # (M, num_classes)
+
+    #classification loss averaged over batch
+    cls_loss = torch.nn.functional.cross_entropy(cls_scores, GT_class, reduction='sum') * 1./batch_size
+    total_loss = total_loss + cls_loss
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -394,7 +484,22 @@ class TwoStageDetector(nn.Module):
     # probabilities from the second-stage network to compute final_class.       #
     ##############################################################################
     # Replace "pass" statement with your code
-    pass
+    final_proposals, final_conf_probs, features = \
+        self.rpn.inference(images, thresh, nms_thresh, mode="FasterRCNN")
+    roi_aliged_featured = torchvision.ops.roi_align(features, final_proposals, (self.roi_output_h, self.roi_output_w))
+    pooled_features = torch.mean(roi_aliged_featured, dim=(2,3))
+    cls_scores = self.cls_layer(pooled_features)
+    prediacted_class = torch.argmax(cls_scores, dim=1).unsqueeze(-1)
+
+    B = images.shape[0]
+    final_class = []
+    st_index = 0
+    for i in range(B):
+      M_i = final_proposals[i].shape[0]
+      end_index = st_index + M_i
+      final_class.append(prediacted_class[st_index:end_index])
+      st_index = end_index
+
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################

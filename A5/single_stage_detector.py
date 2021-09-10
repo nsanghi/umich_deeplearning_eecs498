@@ -481,7 +481,7 @@ class SingleStageDetector(nn.Module):
         sub_proposals = sub_proposals[mask1,:]
         sub_class_scores = sub_class_scores[mask1]
         # filter by nms
-        mask2 = nms(sub_proposals, sub_conf_scores, iou_threshold=nms_thresh)
+        mask2 = torchvision.ops.nms(sub_proposals, sub_conf_scores, iou_threshold=nms_thresh)
         # append result
         final_proposals.append(sub_proposals[mask2,:])
         final_conf_scores.append(sub_conf_scores[mask2].unsqueeze(1))

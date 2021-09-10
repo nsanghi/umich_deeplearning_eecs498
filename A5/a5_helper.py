@@ -275,7 +275,7 @@ def ReferenceOnActivatedAnchors(anchors, bboxes, grid, iou_mat, pos_thresh=0.7, 
     activated_anc_mask |= (iou_mat > pos_thresh) # using the pos_thresh condition as well
     # if an anchor matches multiple GT boxes, choose the box with the largest iou
     activated_anc_mask = activated_anc_mask.max(dim=-1)[0] # Bx(AxH’xW’)
-    activated_anc_ind = torch.nonzero(activated_anc_mask.view(-1)).squeeze(-1)
+    activated_anc_ind = torch.nonzero(activated_anc_mask.view(-1)).squeeze(-1) #value going from 0 to (BxAxH’xW’)
 
     # GT conf scores
     GT_conf_scores = max_iou_per_anc[activated_anc_mask] # M
@@ -311,7 +311,7 @@ def ReferenceOnActivatedAnchors(anchors, bboxes, grid, iou_mat, pos_thresh=0.7, 
     bboxes = bboxes[:, :4] #(M, 4)
     activated_anc_ind = (activated_anc_ind / float(activated_anc_mask.shape[-1])).long() # (M,) with M index in range (BxAxH'xW')
 
-  print('number of pos proposals: ', activated_anc_ind.shape[0])
+  # print('number of pos proposals: ', activated_anc_ind.shape[0])
   activated_anc_coord = anchors.view(-1, 4)[activated_anc_ind]  # (Mx4) with M in range (BxAxH'xW')
 
   # GT offsets
