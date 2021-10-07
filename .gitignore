@@ -13,3 +13,4 @@
 **/VOC*.tar
 **/.ipynb_checkpoints/
 **/*.zip
+**/MNIST_data
